@@ -26,11 +26,16 @@ final class ListingsStore {
             listings = try await supabase
                 .from("listings")
                 .select()
+                .eq("is_hidden", value: false)   // admins can read hidden ones, the public feed shouldn't show them
                 .order("created_at", ascending: false)
                 .limit(200)
                 .execute()
                 .value
             featuredIDs = computeFeatured()
+        } catch is CancellationError {
+            // refresh gesture ended early, not an error
+        } catch let e as URLError where e.code == .cancelled {
+            // same thing from the network layer
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -83,9 +88,43 @@ final class ListingsStore {
         await load()
     }
 
+    /// The code the advertiser puts on their site. Created on first ask, kept until the URL changes.
+    func verifyToken(for listing: Listing) async throws -> String {
+        try await supabase
+            .rpc("get_verify_token", params: ["p_listing": listing.id.uuidString])
+            .execute()
+            .value
+    }
+
+    struct VerifyResult: Decodable { let verified: Bool?; let error: String? }
+
+    /// Asks the server to look for the code on the site. Returns nil on success, or a message to show.
+    func verifySite(_ listing: Listing) async -> String? {
+        do {
+            let token = try await supabase.auth.session.accessToken
+            let result: VerifyResult = try await supabase.functions.invoke(
+                "verify-site",
+                options: FunctionInvokeOptions(
+                    headers: ["Authorization": "Bearer \(token)"],
+                    body: ["listing_id": listing.id.uuidString]
+                )
+            )
+            if result.verified == true { await load(); return nil }
+            return result.error ?? "Couldn't verify yet."
+        } catch FunctionsError.httpError(_, let data) {
+            return (try? JSONDecoder().decode(VerifyResult.self, from: data))?.error ?? "Couldn't verify. Try again."
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     /// Deletes the account on the server (listings and reviews go with it), then signs out here.
     func deleteAccount() async throws {
-        try await supabase.functions.invoke("delete-account")
+        let token = try await supabase.auth.session.accessToken
+        try await supabase.functions.invoke(
+            "delete-account",
+            options: FunctionInvokeOptions(headers: ["Authorization": "Bearer \(token)"])
+        )
         try? await supabase.auth.signOut(scope: .local)
         await load()
     }
@@ -131,6 +170,7 @@ final class ListingsStore {
             .from("reviews")
             .select()
             .eq("listing_id", value: listingID)
+            .eq("is_hidden", value: false)
             .order("created_at", ascending: false)
             .limit(100)
             .execute()

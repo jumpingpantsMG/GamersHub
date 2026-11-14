@@ -126,6 +126,7 @@ struct ListingDetailView: View {
                     HStack(spacing: 6) {
                         Chip(text: listing.category)
                         AgeBadge(rating: listing.ageRating)
+                        if listing.verified { VerifiedBadge() }
                         if listing.isSponsored {
                             Label(theme.heading("Sponsored"), systemImage: "megaphone.fill")
                                 .font(.caption.bold()).foregroundStyle(theme.accent2)

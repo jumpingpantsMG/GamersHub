@@ -115,7 +115,7 @@ struct BrowseView: View {
             .background(ThemedBackground())
             .navigationTitle("GamersHub")
             .searchable(text: $search, prompt: "Search games and sites")
-            .refreshable { await store.load() }
+            .refreshable { await Task { await store.load() }.value }
             .task { await store.load() }
             .toolbar {
                 ToolbarItem(placement: .automatic) {
@@ -462,6 +462,7 @@ struct ListingCard: View {
                                     .lineLimit(2)
                                     .multilineTextAlignment(.leading)
                                 RatingSummary(listing: listing)
+                                if listing.verified { VerifiedBadge() }
                                 if let rank = listing.rank { RankBadge(rank: rank) }
                             }
                             Spacer(minLength: 0)

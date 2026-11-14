@@ -282,6 +282,15 @@ struct AgeBadge: View {
     }
 }
 
+struct VerifiedBadge: View {
+    var body: some View {
+        Label("Verified", systemImage: "checkmark.seal.fill")
+            .font(.caption2.bold())
+            .foregroundStyle(.green)
+            .help("The advertiser proved they own this site")
+    }
+}
+
 struct Chip: View {
     @Environment(\.theme) private var theme
     let text: String

@@ -14,6 +14,9 @@ struct Listing: Identifiable, Codable, Hashable {
     let avgRating: Double?
     let ratingCount: Int?
     let clickCount: Int?
+    var isVerified: Bool? = nil    // set by the server once the advertiser proves they own the site
+
+    var verified: Bool { isVerified ?? false }
 
     /// Paid placement. Shown as "Sponsored".
     var isSponsored: Bool { (sponsoredUntil ?? .distantPast) > Date() }
@@ -44,6 +47,7 @@ struct Listing: Identifiable, Codable, Hashable {
         case avgRating = "avg_rating"
         case ratingCount = "rating_count"
         case clickCount = "click_count"
+        case isVerified = "is_verified"
     }
 }
 

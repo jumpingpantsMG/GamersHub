@@ -13,6 +13,7 @@ struct AdvertiserHome: View {
     @State private var editing: Listing?
     @State private var sponsoring: Listing?
     @State private var deleting: Listing?
+    @State private var verifying: Listing?
     @State private var showDeleteAccount = false
     @State private var working = false
 
@@ -50,7 +51,7 @@ struct AdvertiserHome: View {
                 }
             }
             .task { await loadMine() }
-            .refreshable { await loadMine() }
+            .refreshable { await Task { await loadMine() }.value }
             .sheet(isPresented: $showNew, onDismiss: { Task { await loadMine() } }) {
                 SubmitListingView(store: store)
             }
@@ -63,6 +64,11 @@ struct AdvertiserHome: View {
                         await loadMine()
                         await store.load()
                     }
+                }
+            }
+            .sheet(item: $verifying) { l in
+                VerifySiteSheet(listing: l, store: store) {
+                    Task { await loadMine() }
                 }
             }
             .confirmationDialog(
@@ -94,6 +100,7 @@ struct AdvertiserHome: View {
             HStack {
                 Text(l.title).font(.headline)
                 Spacer()
+                if l.verified { VerifiedBadge() }
                 AgeBadge(rating: l.ageRating)
             }
             if l.isSponsored, let until = l.sponsoredUntil {
@@ -105,6 +112,9 @@ struct AdvertiserHome: View {
                 Button { editing = l } label: { Label("Edit", systemImage: "pencil") }
                 Button { sponsoring = l } label: {
                     Label(l.isSponsored ? "Extend" : "Sponsor", systemImage: "megaphone")
+                }
+                if !l.verified {
+                    Button { verifying = l } label: { Label("Verify", systemImage: "checkmark.seal") }
                 }
                 Spacer()
                 Button(role: .destructive) { deleting = l } label: { Image(systemName: "trash") }
