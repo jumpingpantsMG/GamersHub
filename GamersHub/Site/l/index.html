@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src https: data:; connect-src https://qyfzhgqrvkbviipfglsk.supabase.co; base-uri 'none'; form-action 'none'">
+  <title>GamersHub</title>
+  <style>
+    :root { --bg:#07050f; --card:#120b2a; --text:#ecebf5; --muted:#a6a3bd; --a:#a855f7; --b:#22d3ee; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--text);
+           background: radial-gradient(900px 500px at 0% 0%, rgba(168,85,247,.28), transparent 60%),
+                       radial-gradient(800px 500px at 100% 100%, rgba(34,211,238,.18), transparent 60%), var(--bg); min-height:100vh; }
+    main { max-width: 560px; margin: 0 auto; padding: 32px 20px 64px; }
+    .brand { font-weight:800; letter-spacing:.04em; background:linear-gradient(90deg,var(--a),var(--b)); -webkit-background-clip:text; background-clip:text; color:transparent; }
+    .card { background:var(--card); border:1px solid rgba(255,255,255,.12); border-radius:18px; overflow:hidden; margin-top:16px; }
+    .card img { width:100%; aspect-ratio:2/1; object-fit:cover; display:block; }
+    .body { padding:18px; }
+    h1 { margin:0 0 6px; font-size:1.5rem; }
+    p { color:var(--muted); margin:8px 0; overflow-wrap:anywhere; }
+    .tags { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }
+    .tag { font-size:.8rem; padding:2px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.18); color:var(--muted); }
+    .tag.ok { color:#4ade80; border-color:#4ade80; }
+    .btns { display:flex; gap:10px; flex-wrap:wrap; margin-top:16px; }
+    a.btn { color:#fff; text-decoration:none; padding:10px 18px; border-radius:999px; border:1px solid rgba(255,255,255,.2); background:rgba(255,255,255,.07); }
+    a.btn.main { background:linear-gradient(90deg,var(--a),var(--b)); border:0; font-weight:700; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand">GAMERSHUB</div>
+    <div id="out"><p>Loading...</p></div>
+  </main>
+  <script src="l.js"></script>
+</body>
+</html>
