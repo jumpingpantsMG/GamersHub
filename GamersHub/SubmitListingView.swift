@@ -13,6 +13,11 @@ struct SubmitListingView: View {
     @State private var imageText: String
     @State private var category: String
     @State private var age: AgeRating
+    @State private var shotsText: String
+    @State private var trailerText: String
+    @State private var pricing: String
+    @State private var platforms: Set<String>
+    @State private var tags: Set<String>
     @State private var sending = false
     @State private var error: String?
 
@@ -25,6 +30,29 @@ struct SubmitListingView: View {
         _imageText = State(initialValue: editing?.imageURL ?? "")
         _category = State(initialValue: editing?.category ?? ListingCategory.all[0])
         _age = State(initialValue: AgeRating(rawValue: editing?.ageRating ?? 4) ?? .everyone)
+        _shotsText = State(initialValue: (editing?.shots ?? []).joined(separator: "\n"))
+        _trailerText = State(initialValue: editing?.trailerURL ?? "")
+        _pricing = State(initialValue: editing?.pricing ?? "")
+        _platforms = State(initialValue: Set(editing?.platformList ?? []))
+        _tags = State(initialValue: Set(editing?.tagList ?? []))
+    }
+
+    /// One link per line.
+    private var shotLines: [String] {
+        shotsText.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+    private var shotsValid: Bool {
+        shotLines.count <= 8 && shotLines.allSatisfy { httpsURL($0) != nil && $0.count <= 500 }
+    }
+    private var trailerValid: Bool {
+        trailerText.isEmpty || (httpsURL(trailerText) != nil && trailerText.count <= 300)
+    }
+
+    private func flag(_ set: Binding<Set<String>>, _ id: String) -> Binding<Bool> {
+        Binding(get: { set.wrappedValue.contains(id) },
+                set: { on in if on { set.wrappedValue.insert(id) } else { set.wrappedValue.remove(id) } })
     }
 
     private func httpsURL(_ text: String) -> URL? {
@@ -41,6 +69,7 @@ struct SubmitListingView: View {
         && (10...300).contains(blurb.count)
         && normalizedURL != nil
         && (imageText.isEmpty || (normalizedImageURL != nil && imageText.count <= 500))
+        && shotsValid && trailerValid
     }
 
     var body: some View {
@@ -83,6 +112,37 @@ struct SubmitListingView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
 
+                Section("Screenshots (optional, up to 8)") {
+                    TextField("One https:// image link per line", text: $shotsText, axis: .vertical)
+                        .lineLimit(3...8)
+                    if !shotsValid {
+                        Text("Each line must be a full https:// link, and 8 at most.")
+                            .font(.footnote).foregroundStyle(.red)
+                    }
+                    TextField("Trailer link (optional), e.g. a YouTube link", text: $trailerText)
+                    if !trailerValid {
+                        Text("The trailer must be a full https:// link.")
+                            .font(.footnote).foregroundStyle(.red)
+                    }
+                }
+
+                Section("Pricing") {
+                    Picker("Pricing", selection: $pricing) {
+                        Text("Not specified").tag("")
+                        ForEach(Taxonomy.pricing) { Text($0.label).tag($0.id) }
+                    }
+                }
+                Section("Platforms") {
+                    ForEach(Taxonomy.platforms) { o in
+                        Toggle(o.label, systemImage: o.symbol, isOn: flag($platforms, o.id))
+                    }
+                }
+                Section("Features") {
+                    ForEach(Taxonomy.tags) { o in
+                        Toggle(o.label, systemImage: o.symbol, isOn: flag($tags, o.id))
+                    }
+                }
+
                 Section("Details") {
                     Picker("Category", selection: $category) {
                         ForEach(ListingCategory.all, id: \.self) { Text($0).tag($0) }
@@ -116,7 +176,7 @@ struct SubmitListingView: View {
             }
         }
         #if os(macOS)
-        .frame(minWidth: 480, minHeight: 600)
+        .frame(minWidth: 480, minHeight: 700)
         #endif
     }
 
@@ -136,7 +196,12 @@ struct SubmitListingView: View {
                     url: url.absoluteString,
                     imageURL: normalizedImageURL?.absoluteString,
                     category: category,
-                    ageRating: age.rawValue
+                    ageRating: age.rawValue,
+                    screenshots: shotLines,
+                    trailerURL: trailerText.isEmpty ? nil : trailerText.trimmingCharacters(in: .whitespaces),
+                    pricing: pricing.isEmpty ? nil : pricing,
+                    platforms: Taxonomy.platforms.map(\.id).filter(platforms.contains),
+                    tags: Taxonomy.tags.map(\.id).filter(tags.contains)
                 ))
             } else {
                 try await store.submit(NewListing(
@@ -145,7 +210,12 @@ struct SubmitListingView: View {
                     url: url.absoluteString,
                     imageURL: normalizedImageURL?.absoluteString,
                     category: category,
-                    ageRating: age.rawValue
+                    ageRating: age.rawValue,
+                    screenshots: shotLines,
+                    trailerURL: trailerText.isEmpty ? nil : trailerText.trimmingCharacters(in: .whitespaces),
+                    pricing: pricing.isEmpty ? nil : pricing,
+                    platforms: Taxonomy.platforms.map(\.id).filter(platforms.contains),
+                    tags: Taxonomy.tags.map(\.id).filter(tags.contains)
                 ))
             }
             dismiss()

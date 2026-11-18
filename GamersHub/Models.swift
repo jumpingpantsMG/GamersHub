@@ -15,11 +15,26 @@ struct Listing: Identifiable, Codable, Hashable {
     let ratingCount: Int?
     let clickCount: Int?
     var isVerified: Bool? = nil    // set by the server once the advertiser proves they own the site
+    var sponsoredFrom: Date? = nil // when a paid placement starts (null = already started)
+    var screenshots: [String]? = nil
+    var trailerURL: String? = nil
+    var pricing: String? = nil
+    var platforms: [String]? = nil
+    var tags: [String]? = nil
+
+    var shots: [String] { screenshots ?? [] }
+    var platformList: [String] { platforms ?? [] }
+    var tagList: [String] { tags ?? [] }
 
     var verified: Bool { isVerified ?? false }
 
     /// Paid placement. Shown as "Sponsored".
-    var isSponsored: Bool { (sponsoredUntil ?? .distantPast) > Date() }
+    var isSponsored: Bool {
+        let now = Date()
+        return (sponsoredFrom ?? .distantPast) <= now && (sponsoredUntil ?? .distantPast) > now
+    }
+    /// Paid for, but the start date hasn't arrived.
+    var isScheduled: Bool { (sponsoredFrom ?? .distantPast) > Date() && sponsoredUntil != nil }
     var ratingValue: Double { avgRating ?? 0 }
     var reviewCount: Int { ratingCount ?? 0 }
     var clicks: Int { clickCount ?? 0 }
@@ -48,6 +63,9 @@ struct Listing: Identifiable, Codable, Hashable {
         case ratingCount = "rating_count"
         case clickCount = "click_count"
         case isVerified = "is_verified"
+        case sponsoredFrom = "sponsored_from"
+        case trailerURL = "trailer_url"
+        case screenshots, pricing, platforms, tags
     }
 }
 
@@ -59,11 +77,17 @@ struct NewListing: Encodable {
     let imageURL: String?
     let category: String
     let ageRating: Int
+    var screenshots: [String] = []
+    var trailerURL: String? = nil
+    var pricing: String? = nil
+    var platforms: [String] = []
+    var tags: [String] = []
 
     enum CodingKeys: String, CodingKey {
-        case title, description, url, category
+        case title, description, url, category, screenshots, pricing, platforms, tags
         case imageURL = "image_url"
         case ageRating = "age_rating"
+        case trailerURL = "trailer_url"
     }
 }
 
@@ -76,11 +100,17 @@ struct ListingEdit: Encodable {
     let imageURL: String?
     let category: String
     let ageRating: Int
+    var screenshots: [String] = []
+    var trailerURL: String? = nil
+    var pricing: String? = nil
+    var platforms: [String] = []
+    var tags: [String] = []
 
     enum CodingKeys: String, CodingKey {
-        case title, description, url, category
+        case title, description, url, category, screenshots, pricing, platforms, tags
         case imageURL = "image_url"
         case ageRating = "age_rating"
+        case trailerURL = "trailer_url"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -91,6 +121,11 @@ struct ListingEdit: Encodable {
         try c.encode(imageURL, forKey: .imageURL)
         try c.encode(category, forKey: .category)
         try c.encode(ageRating, forKey: .ageRating)
+        try c.encode(screenshots, forKey: .screenshots)
+        try c.encode(trailerURL, forKey: .trailerURL)   // null clears it
+        try c.encode(pricing, forKey: .pricing)
+        try c.encode(platforms, forKey: .platforms)
+        try c.encode(tags, forKey: .tags)
     }
 }
 
@@ -101,12 +136,16 @@ struct Review: Identifiable, Codable, Hashable {
     let stars: Int
     let comment: String?
     let createdAt: Date
+    var helpfulCount: Int? = nil
+    var reply: ReviewReply? = nil     // the advertiser's answer, if any
 
     enum CodingKeys: String, CodingKey {
         case id, stars, comment
         case listingId = "listing_id"
         case userId = "user_id"
         case createdAt = "created_at"
+        case helpfulCount = "helpful_count"
+        case reply = "review_replies"
     }
 }
 

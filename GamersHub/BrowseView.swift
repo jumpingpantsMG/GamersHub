@@ -1,4 +1,5 @@
 import SwiftUI
+import Supabase
 
 enum FeedSort: String, CaseIterable, Identifiable {
     case newest = "Newest"
@@ -8,10 +9,24 @@ enum FeedSort: String, CaseIterable, Identifiable {
 
 /// Sponsored = paid placement. Featured = earned from ratings and visits.
 enum HeroKind {
-    case sponsored, featured
+    case sponsored, featured, trending, new
 
-    var label: String { self == .sponsored ? "Sponsored" : "Featured" }
-    var symbol: String { self == .sponsored ? "megaphone.fill" : "flame.fill" }
+    var label: String {
+        switch self {
+        case .sponsored: "Sponsored"
+        case .featured: "Featured"
+        case .trending: "Trending"
+        case .new: "New"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .sponsored: "megaphone.fill"
+        case .featured: "flame.fill"
+        case .trending: "chart.line.uptrend.xyaxis"
+        case .new: "sparkles"
+        }
+    }
 }
 
 struct BrowseView: View {
@@ -19,10 +34,16 @@ struct BrowseView: View {
 
     @State private var themes = ThemeManager()
     @State private var hidden = HiddenStore()
+    @State private var saved = SavedStore()
+    @State private var savedOnly = false
+    @State private var showProfile = false
+    @State private var showNewPassword = false
+    @State private var router = DeepLinkRouter.shared
     @State private var store = ListingsStore()
     @State private var search = ""
     @State private var category: String?
     @State private var sort: FeedSort = .newest
+    @State private var filters = FeedFilters()
     @State private var selected: Listing?
     @State private var reporting: Listing?
     @State private var pendingAdult: Listing?
@@ -38,6 +59,8 @@ struct BrowseView: View {
     private var filtered: [Listing] {
         let base = store.listings.filter { l in
             !hidden.isHidden(l)
+            && filters.matches(l)
+            && (!savedOnly || saved.isSaved(l))
             && (category == nil || l.category == category)
             && (search.isEmpty
                 || l.title.localizedCaseInsensitiveContains(search)
@@ -57,9 +80,28 @@ struct BrowseView: View {
         store.featuredIDs.compactMap { id in filtered.first { $0.id == id } }
     }
 
+    /// Busy lately. Skips anything already shown above.
+    private var trendingRow: [Listing] {
+        guard !savedOnly else { return [] }
+        let skip = Set(sponsored.map(\.id) + featuredRow.map(\.id))
+        let rows = store.trendingIDs.compactMap { id in filtered.first { $0.id == id } }
+            .filter { !skip.contains($0.id) }
+        return Array(rows.prefix(8))
+    }
+
+    /// Added in the last 7 days. Only shown when the main list keeps at least 3 sites, so it never empties it.
+    private var newRow: [Listing] {
+        guard !savedOnly, search.isEmpty else { return [] }
+        let skip = Set((sponsored + featuredRow + trendingRow).map(\.id))
+        let cutoff = Date().addingTimeInterval(-7 * 86_400)
+        let candidates = Array(filtered.filter { $0.createdAt > cutoff && !skip.contains($0.id) }.prefix(8))
+        let remaining = filtered.count - skip.count - candidates.count
+        return remaining >= 3 ? candidates : []
+    }
+
     /// Everything else. A listing only ever appears in one section.
     private var regular: [Listing] {
-        let skip = Set(sponsored.map(\.id) + featuredRow.map(\.id))
+        let skip = Set((sponsored + featuredRow + trendingRow + newRow).map(\.id))
         return filtered.filter { !skip.contains($0.id) }
     }
 
@@ -78,6 +120,18 @@ struct BrowseView: View {
                             sectionHeader("Featured", systemImage: "flame.fill", tint: .orange,
                                           subtitle: "Top rated and most visited")
                             heroCarousel(featuredRow, kind: .featured)
+                        }
+
+                        if !trendingRow.isEmpty {
+                            sectionHeader("Trending", systemImage: "chart.line.uptrend.xyaxis", tint: .pink,
+                                          subtitle: "Most visited this week")
+                            heroCarousel(trendingRow, kind: .trending)
+                        }
+
+                        if !newRow.isEmpty {
+                            sectionHeader("New this week", systemImage: "sparkles", tint: .green,
+                                          subtitle: "Just added")
+                            heroCarousel(newRow, kind: .new)
                         }
 
                         sectionHeader(sort == .topRated ? "Top rated" : "All sites",
@@ -115,9 +169,44 @@ struct BrowseView: View {
             .background(ThemedBackground())
             .navigationTitle("GamersHub")
             .searchable(text: $search, prompt: "Search games and sites")
-            .refreshable { await Task { await store.load() }.value }
-            .task { await store.load() }
+            .refreshable { await Task { await store.load() }.value }  // own task, so the pull gesture can't cancel the request
+            .task {
+                await store.load()
+                await openDeepLink()
+            }
+            .onChange(of: router.listingID) { Task { await openDeepLink() } }
+            .onChange(of: router.showNewPassword) {
+                guard router.showNewPassword else { return }
+                router.showNewPassword = false
+                showSubmit = false
+                showNewPassword = true
+            }
             .toolbar {
+                ToolbarItem(placement: .automatic) {
+                    Menu {
+                        Picker("Pricing", selection: $filters.pricing) {
+                            Text("Any price").tag(String?.none)
+                            ForEach(Taxonomy.pricing) { Text($0.label).tag(String?.some($0.id)) }
+                        }
+                        Menu("Platform") {
+                            ForEach(Taxonomy.platforms) { o in
+                                Toggle(o.label, isOn: filterFlag(\.platforms, o.id))
+                            }
+                        }
+                        Menu("Features") {
+                            ForEach(Taxonomy.tags) { o in
+                                Toggle(o.label, isOn: filterFlag(\.tags, o.id))
+                            }
+                        }
+                        if filters.isActive {
+                            Divider()
+                            Button("Clear filters", role: .destructive) { filters = FeedFilters() }
+                        }
+                    } label: {
+                        Label("Filter", systemImage: filters.isActive
+                              ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                    }
+                }
                 ToolbarItem(placement: .automatic) {
                     Menu {
                         Picker("Sort", selection: $sort) {
@@ -135,10 +224,21 @@ struct BrowseView: View {
                         Button("Customize...", systemImage: "slider.horizontal.3") { showStudio = true }
                         Toggle("Sounds", isOn: $soundOn)
                         Divider()
+                        Button("Reviewer profile...", systemImage: "bolt.shield") { showProfile = true }
                         Button("Hidden and blocked...", systemImage: "eye.slash") { showHidden = true }
                     } label: {
                         Label("Style", systemImage: "paintpalette")
                     }
+                }
+                ToolbarItem(placement: .automatic) {
+                    Button { surprise() } label: { Label("Surprise me", systemImage: "dice") }
+                        .help("Open a random site")
+                }
+                ToolbarItem(placement: .automatic) {
+                    Button { savedOnly.toggle() } label: {
+                        Label("Saved", systemImage: savedOnly ? "heart.fill" : "heart")
+                    }
+                    .help(savedOnly ? "Show everything" : "Show only saved sites")
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button { tapTick += 1; showSubmit = true } label: {
@@ -156,6 +256,19 @@ struct BrowseView: View {
         }
         .sheet(isPresented: $showStudio) {
             ThemeStudioView(themes: themes)
+        }
+        .task {
+            // A password-reset link signs the person in and fires this event.
+            for await (event, _) in supabase.auth.authStateChanges where event == .passwordRecovery {
+                showSubmit = false
+                showNewPassword = true
+            }
+        }
+        .sheet(isPresented: $showNewPassword) {
+            NewPasswordSheet()
+        }
+        .sheet(isPresented: $showProfile) {
+            ReviewerProfileView(store: store)
         }
         .sheet(isPresented: $showHidden) {
             HiddenItemsView(hidden: hidden)
@@ -175,6 +288,7 @@ struct BrowseView: View {
         .sensoryFeedback(.impact(weight: .light), trigger: tapTick)
         .environment(\.theme, theme)
         .environment(hidden)
+        .environment(saved)
         .preferredColorScheme(.dark)
         .tint(theme.accent)
         .animation(.easeInOut(duration: 0.3), value: themes.spec)
@@ -192,6 +306,13 @@ struct BrowseView: View {
         )
     }
 
+    private func filterFlag(_ path: WritableKeyPath<FeedFilters, Set<String>>, _ id: String) -> Binding<Bool> {
+        Binding(get: { filters[keyPath: path].contains(id) },
+                set: { on in
+                    if on { filters[keyPath: path].insert(id) } else { filters[keyPath: path].remove(id) }
+                })
+    }
+
     private func heroCarousel(_ items: [Listing], kind: HeroKind) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 14) {
@@ -204,6 +325,9 @@ struct BrowseView: View {
                             kind == .sponsored ? min(length * 0.88, 440) : min(length * 0.72, 360)
                         }
                         .zoomSource(l.id, in: zoomNS)
+                        .onSeen {
+                            if kind == .sponsored { store.recordEvent(l, .impression) }
+                        }
                         .scrollTransition(axis: .horizontal) { content, phase in
                             content
                                 .scaleEffect(phase.isIdentity ? 1 : 0.92)
@@ -314,6 +438,17 @@ struct BrowseView: View {
         Sound.tap()
     }
 
+    private func surprise() {
+        guard let l = filtered.randomElement() else { return }
+        open(detail: l)
+    }
+
+    private func openDeepLink() async {
+        guard let id = router.listingID else { return }
+        router.listingID = nil
+        if let l = await store.listing(id: id) { selected = l }
+    }
+
     private func open(detail l: Listing) {
         tap()
         selected = l
@@ -336,10 +471,13 @@ struct BrowseView: View {
 /// Report, hide, and block. Hiding and blocking stay on this device.
 struct ListingMenu: View {
     @Environment(HiddenStore.self) private var hidden
+    @Environment(SavedStore.self) private var saved
     let listing: Listing
     let onReport: () -> Void
 
     var body: some View {
+        Button(saved.isSaved(listing) ? "Remove from saved" : "Save",
+               systemImage: saved.isSaved(listing) ? "heart.slash" : "heart") { saved.toggle(listing) }
         Button("Hide this listing", systemImage: "eye.slash") { hidden.hide(listing) }
         if listing.ownerId != nil {
             Button("Block this advertiser", systemImage: "person.crop.circle.badge.xmark") {
@@ -362,16 +500,30 @@ struct HeroCard: View {
     @State private var pressed = false
     @State private var pulse = false
 
-    private var labelColor: Color { kind == .sponsored ? theme.accent2 : .yellow }
+    private var labelColor: Color {
+        switch kind {
+        case .sponsored: theme.accent2
+        case .featured: .yellow
+        case .trending: .pink
+        case .new: .green
+        }
+    }
 
     private var edgeStyle: AnyShapeStyle {
         kind == .sponsored
             ? theme.edge(strong: true)
-            : AnyShapeStyle(LinearGradient(colors: [.yellow.opacity(0.9), .orange.opacity(0.6)],
+            : AnyShapeStyle(LinearGradient(colors: [labelColor.opacity(0.9), glowColor.opacity(0.6)],
                                            startPoint: .topLeading, endPoint: .bottomTrailing))
     }
 
-    private var glowColor: Color { kind == .sponsored ? theme.accent : .orange }
+    private var glowColor: Color {
+        switch kind {
+        case .sponsored: theme.accent
+        case .featured: .orange
+        case .trending: .pink
+        case .new: .green
+        }
+    }
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: theme.radius + 6, style: .continuous)
@@ -481,6 +633,9 @@ struct ListingCard: View {
 
                 HStack {
                     Chip(text: listing.category)
+                    if let p = listing.pricing, let name = Taxonomy.label(p, in: Taxonomy.pricing) {
+                        Chip(text: name)
+                    }
                     Spacer()
                     Button("Visit", action: onVisit)
                         .buttonStyle(GlowButtonStyle())

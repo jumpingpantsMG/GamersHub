@@ -1,11 +1,3 @@
-//
-//  PurchaseManager.swift
-//  GamersHub
-//
-//  Created by Jaiden Kumar on 7/11/26.
-//
-
-
 import Foundation
 import Observation
 import StoreKit
@@ -60,14 +52,14 @@ final class PurchaseManager {
     }
 
     /// Returns true once the server has applied the purchase.
-    func buy(_ product: Product, for listing: Listing) async -> Bool {
+    func buy(_ product: Product, reservation: UUID) async -> Bool {
         isWorking = true
         message = nil
         defer { isWorking = false }
         do {
-            // The listing id rides inside the signed transaction, so the server knows
-            // which listing was paid for and the client can't redirect it.
-            let result = try await product.purchase(options: [.appAccountToken(listing.id)])
+            // The slot reservation id rides inside the signed transaction, so the server knows
+            // which listing and start date were paid for and the client can't redirect it.
+            let result = try await product.purchase(options: [.appAccountToken(reservation)])
             switch result {
             case .success(let verification):
                 guard case .verified(let txn) = verification else {

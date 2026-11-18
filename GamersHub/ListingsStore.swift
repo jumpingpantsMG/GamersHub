@@ -12,6 +12,7 @@ final class ListingsStore {
     /// Listings that earned a "Featured" spot (best ratings and most visits), best first.
     /// Paid placements are "Sponsored" instead and never appear here.
     private(set) var featuredIDs: [UUID] = []
+    private(set) var trendingIDs: [UUID] = []   // most visited and opened lately, best first
 
     func isFeatured(_ listing: Listing) -> Bool { featuredIDs.contains(listing.id) }
 
@@ -32,22 +33,69 @@ final class ListingsStore {
                 .execute()
                 .value
             featuredIDs = computeFeatured()
+            trendingIDs = await fetchTrending()
         } catch is CancellationError {
-            // refresh gesture ended early, not an error
+            // The refresh gesture ended early. Not an error.
         } catch let e as URLError where e.code == .cancelled {
-            // same thing from the network layer
+            // Same thing, from the network layer.
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
+    private struct TrendParams: Encodable { let p_days: Int; let p_limit: Int }
+    private struct TrendRow: Decodable {
+        let listingId: UUID
+        enum CodingKeys: String, CodingKey { case listingId = "listing_id" }
+    }
+
+    private func fetchTrending() async -> [UUID] {
+        let rows: [TrendRow] = (try? await supabase
+            .rpc("trending_listings", params: TrendParams(p_days: 7, p_limit: 10))
+            .execute().value) ?? []
+        return rows.map(\.listingId)
+    }
+
+    /// One listing by id, for opening a shared link. Adds it to the feed if it wasn't loaded.
+    func listing(id: UUID) async -> Listing? {
+        if let l = listings.first(where: { $0.id == id }) { return l }
+        let found: Listing? = try? await supabase.from("listings").select()
+            .eq("id", value: id).eq("is_hidden", value: false).single().execute().value
+        if let found { listings.append(found) }
+        return found
+    }
+
+    private struct StatsIDs: Encodable { let p_ids: [UUID] }
+
+    func reviewerStats(for ids: [UUID]) async -> [ReviewerStats] {
+        guard !ids.isEmpty else { return [] }
+        return (try? await supabase.rpc("reviewer_stats", params: StatsIDs(p_ids: ids)).execute().value) ?? []
+    }
+
     /// Fire-and-forget click count. Never blocks opening the site.
     func recordClick(_ listing: Listing) {
+        recordEvent(listing, .visit)
+    }
+
+    /// Impressions and page views are sent once per listing per app session. The server also
+    /// keeps one per device per day, so the numbers are unique devices, not raw taps.
+    private var sentEvents = Set<String>()
+
+    func recordEvent(_ listing: Listing, _ kind: EventKind) {
+        if kind != .visit, !sentEvents.insert("\(listing.id)-\(kind.rawValue)").inserted { return }
+        let params = RecordEventParams(p_listing: listing.id, p_kind: kind.rawValue, p_device: DeviceID.current)
         Task {
-            _ = try? await supabase
-                .rpc("increment_click", params: ["listing": listing.id.uuidString])
-                .execute()
+            _ = try? await supabase.rpc("record_event", params: params).execute()
         }
+    }
+
+    /// `owner: true` is the private version (impressions, sponsorship results). Otherwise it's the public one.
+    func stats(for listing: Listing, days: Int, owner: Bool) async throws -> ListingStats {
+        try await supabase
+            .rpc(owner ? "listing_stats" : "public_listing_stats",
+                 params: StatsParams(p_listing: listing.id, p_days: days))
+            .execute()
+            .value
     }
 
     func submit(_ listing: NewListing) async throws {
@@ -118,13 +166,28 @@ final class ListingsStore {
         }
     }
 
+    struct ServerError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+    private struct ServerMessage: Decodable { let error: String? }
+
     /// Deletes the account on the server (listings and reviews go with it), then signs out here.
-    func deleteAccount() async throws {
+    /// The server checks the code that was emailed, so a stolen session alone can't delete an account.
+    func deleteAccount(code: String) async throws {
         let token = try await supabase.auth.session.accessToken
-        try await supabase.functions.invoke(
-            "delete-account",
-            options: FunctionInvokeOptions(headers: ["Authorization": "Bearer \(token)"])
-        )
+        do {
+            try await supabase.functions.invoke(
+                "delete-account",
+                options: FunctionInvokeOptions(
+                    headers: ["Authorization": "Bearer \(token)"],
+                    body: ["code": code]
+                )
+            )
+        } catch FunctionsError.httpError(_, let data) {
+            let text = (try? JSONDecoder().decode(ServerMessage.self, from: data))?.error
+            throw ServerError(message: text ?? "Couldn't delete the account.")
+        }
         try? await supabase.auth.signOut(scope: .local)
         await load()
     }
@@ -168,7 +231,7 @@ final class ListingsStore {
     func reviews(for listingID: UUID) async throws -> [Review] {
         try await supabase
             .from("reviews")
-            .select()
+            .select("*, review_replies(body, created_at)")
             .eq("listing_id", value: listingID)
             .eq("is_hidden", value: false)
             .order("created_at", ascending: false)
@@ -189,6 +252,54 @@ final class ListingsStore {
             .upsert(review, onConflict: "listing_id,user_id")
             .execute()
         await load()   // refreshes avg_rating / rating_count
+    }
+
+    // MARK: Replies, helpful votes
+
+    func saveReply(to review: Review, on listing: Listing, body: String) async throws {
+        let text = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        try await supabase.from("review_replies")
+            .upsert(NewReply(reviewId: review.id, listingId: listing.id, body: text), onConflict: "review_id")
+            .execute()
+    }
+
+    func deleteReply(to review: Review) async throws {
+        try await supabase.from("review_replies").delete().eq("review_id", value: review.id).execute()
+    }
+
+    /// Which of these reviews this device's session already marked helpful.
+    func myHelpfulVotes(for reviewIDs: [UUID]) async -> Set<UUID> {
+        guard !reviewIDs.isEmpty, await currentUserID() != nil else { return [] }
+        let rows: [VoteRow] = (try? await supabase.from("review_votes")
+            .select("review_id")
+            .in("review_id", values: reviewIDs.map(\.uuidString))
+            .execute().value) ?? []
+        return Set(rows.map(\.reviewId))
+    }
+
+    func setHelpful(_ review: Review, on: Bool) async throws {
+        try await ensureViewerSession()
+        if on {
+            try await supabase.from("review_votes").insert(NewVote(reviewId: review.id)).execute()
+        } else if let me = await currentUserID() {
+            try await supabase.from("review_votes").delete()
+                .eq("review_id", value: review.id).eq("user_id", value: me).execute()
+        }
+    }
+
+    // MARK: Sponsorship slots
+
+    func availability(from start: Date, days: Int = 40) async -> [SlotDay] {
+        (try? await supabase
+            .rpc("sponsor_availability", params: AvailabilityParams(p_start: StatsDates.string(start), p_days: days))
+            .execute().value) ?? []
+    }
+
+    /// Holds a slot before the person pays. Throws a readable message if it's sold out.
+    func reserveSlot(for listing: Listing, start: Date, days: Int) async throws -> SlotReservation {
+        try await supabase
+            .rpc("reserve_slot", params: ReserveParams(p_listing: listing.id, p_start: StatsDates.string(start), p_days: days))
+            .execute().value
     }
 
     func deleteReview(_ review: Review) async throws {

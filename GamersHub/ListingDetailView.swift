@@ -3,7 +3,9 @@ import SwiftUI
 struct ListingDetailView: View {
     @Environment(\.theme) private var theme
     @Environment(HiddenStore.self) private var hidden
+    @Environment(SavedStore.self) private var saved
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     let listingID: UUID
     let store: ListingsStore
     let onVisit: (Listing) -> Void
@@ -15,11 +17,21 @@ struct ListingDetailView: View {
     @State private var reportingListing = false
     @State private var reportingReview: Review?
     @State private var error: String?
+    @State private var replying: Review?
+    @State private var votes: Set<UUID> = []
+    @State private var levels: [UUID: Int] = [:]
+    @State private var showStats = false
 
     /// Read from the store so the rating updates right after you review.
     private var listing: Listing? { store.listings.first { $0.id == listingID } }
     private var myReview: Review? { reviews.first { $0.userId == myID } }
-    private var visibleReviews: [Review] { reviews.filter { !hidden.isBlocked($0.userId) } }
+    private var visibleReviews: [Review] {
+        reviews.filter { !hidden.isBlocked($0.userId) }.sorted {
+            let a = $0.helpfulCount ?? 0, b = $1.helpfulCount ?? 0
+            return a != b ? a > b : $0.createdAt > $1.createdAt
+        }
+    }
+    private var isOwner: Bool { myID != nil && listing?.ownerId == myID }
 
     var body: some View {
         Group {
@@ -37,7 +49,23 @@ struct ListingDetailView: View {
         #else
         .navigationTitle("Details")
         #endif
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if let listing {
+                    ShareLink(item: ShareConfig.url(for: listing),
+                              subject: Text(listing.title),
+                              message: Text("Check out \(listing.title) on GamersHub")) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                    Button { saved.toggle(listing) } label: {
+                        Label(saved.isSaved(listing) ? "Remove from saved" : "Save",
+                              systemImage: saved.isSaved(listing) ? "heart.fill" : "heart")
+                    }
+                }
+            }
+        }
         .task { await loadReviews() }
+        .task { if let listing { store.recordEvent(listing, .view) } }
     }
 
     @ViewBuilder
@@ -57,6 +85,7 @@ struct ListingDetailView: View {
                                     infoPanel(listing)
                                     ratingPanel(listing)
                                     descriptionPanel(listing)
+                                    mediaPanel(listing)
                                 }
                                 .frame(width: 440)
 
@@ -72,6 +101,7 @@ struct ListingDetailView: View {
                                 infoPanel(listing)
                                 ratingPanel(listing)
                                 descriptionPanel(listing)
+                                mediaPanel(listing)
                                 reviewsSection(listing)
                                 safetyButtons
                             }
@@ -96,6 +126,12 @@ struct ListingDetailView: View {
         }
         .sheet(item: $reportingReview) { r in
             ReportSheet(listing: listing, review: r, store: store)
+        }
+        .sheet(item: $replying) { r in
+            ReplySheet(review: r, listing: listing, store: store) { Task { await loadReviews() } }
+        }
+        .sheet(isPresented: $showStats) {
+            StatsView(listing: listing, store: store, ownerView: isOwner)
         }
     }
 
@@ -164,6 +200,13 @@ struct ListingDetailView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Text("\(listing.clicks) visit\(listing.clicks == 1 ? "" : "s")")
                     .font(.caption).foregroundStyle(.secondary)
+                Button { showStats = true } label: {
+                    Label("Stats", systemImage: "chart.bar")
+                }
+                .font(.caption.weight(.semibold))
+                .buttonStyle(.plain)
+                .foregroundStyle(theme.accent2)
+                .padding(.top, 2)
             }
             RatingHistogram(reviews: reviews)
         }
@@ -173,11 +216,56 @@ struct ListingDetailView: View {
     }
 
     private func descriptionPanel(_ listing: Listing) -> some View {
-        Text(listing.description)
-            .font(.body)
+        let badges = listingBadges(listing)
+        return VStack(alignment: .leading, spacing: 12) {
+            Text(listing.description).font(.body)
+            if !badges.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) { ForEach(badges, id: \.self) { Chip(text: $0) } }
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardSurface()
+    }
+
+    /// Screenshots and trailer link. The trailer opens in the browser, nothing is embedded.
+    @ViewBuilder
+    private func mediaPanel(_ listing: Listing) -> some View {
+        let trailer = listing.trailerURL.flatMap { URL(string: $0) }.flatMap { $0.scheme == "https" ? $0 : nil }
+        if !listing.shots.isEmpty || trailer != nil {
+            VStack(alignment: .leading, spacing: 12) {
+                if !listing.shots.isEmpty {
+                    Text(theme.heading("Screenshots")).font(theme.title(.headline))
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            ForEach(listing.shots, id: \.self) { s in
+                                AsyncImage(url: URL(string: s)) { phase in
+                                    switch phase {
+                                    case .success(let image): image.resizable().scaledToFill()
+                                    case .failure: Image(systemName: "photo").foregroundStyle(.secondary)
+                                    default: ProgressView()
+                                    }
+                                }
+                                .frame(width: 284, height: 160)
+                                .background(.black.opacity(0.25))
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            }
+                        }
+                    }
+                }
+                if let trailer {
+                    Button { openURL(trailer) } label: {
+                        Label("Watch trailer", systemImage: "play.rectangle.fill")
+                    }
+                    .buttonStyle(GlowButtonStyle())
+                }
+            }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .cardSurface()
+        }
     }
 
     /// Report, hide, and block. Hiding and blocking stay on this device.
@@ -238,6 +326,11 @@ struct ListingDetailView: View {
             VStack(spacing: 10) {
                 ForEach(visibleReviews) { r in
                     ReviewRow(review: r, isMine: r.userId == myID,
+                              isOwner: isOwner,
+                              level: levels[r.userId],
+                              helpful: votes.contains(r.id),
+                              onHelpful: { Task { await toggleHelpful(r) } },
+                              onReply: { replying = r },
                               onReport: { reportingReview = r },
                               onBlock: {
                                   hidden.blockUser(r.userId, label: "Reviewer on \"\(listing.title)\"")
@@ -258,7 +351,27 @@ struct ListingDetailView: View {
         myID = await store.currentUserID()
         do {
             reviews = try await store.reviews(for: listingID)
+            votes = await store.myHelpfulVotes(for: reviews.map(\.id))
+            let stats = await store.reviewerStats(for: Array(Set(reviews.map(\.userId))))
+            levels = Dictionary(uniqueKeysWithValues: stats.map { ($0.userId, $0.level) })
+        } catch is CancellationError {
+        } catch let e as URLError where e.code == .cancelled {
         } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    /// Updates the count on screen right away, and puts it back if the server says no.
+    private func toggleHelpful(_ review: Review) async {
+        guard let i = reviews.firstIndex(where: { $0.id == review.id }) else { return }
+        let on = !votes.contains(review.id)
+        if on { votes.insert(review.id) } else { votes.remove(review.id) }
+        reviews[i].helpfulCount = max(0, (reviews[i].helpfulCount ?? 0) + (on ? 1 : -1))
+        do {
+            try await store.setHelpful(review, on: on)
+        } catch {
+            if on { votes.remove(review.id) } else { votes.insert(review.id) }
+            reviews[i].helpfulCount = max(0, (reviews[i].helpfulCount ?? 0) + (on ? -1 : 1))
             self.error = error.localizedDescription
         }
     }
@@ -276,6 +389,11 @@ struct ListingDetailView: View {
 struct ReviewRow: View {
     let review: Review
     let isMine: Bool
+    let isOwner: Bool
+    let level: Int?
+    let helpful: Bool
+    let onHelpful: () -> Void
+    let onReply: () -> Void
     let onReport: () -> Void
     let onBlock: () -> Void
     let onDelete: () -> Void
@@ -285,6 +403,7 @@ struct ReviewRow: View {
             HStack {
                 StarsView(rating: Double(review.stars), size: 13)
                 if isMine { Chip(text: "You") }
+                if let level { LevelChip(level: level) }
                 Spacer()
                 Text(review.createdAt.formatted(date: .abbreviated, time: .omitted))
                     .font(.caption).foregroundStyle(.secondary)
@@ -305,6 +424,35 @@ struct ReviewRow: View {
             if let comment = review.comment, !comment.isEmpty {
                 Text(comment).font(.subheadline)
             }
+
+            if let reply = review.reply {
+                VStack(alignment: .leading, spacing: 3) {
+                    Label("Reply from the advertiser", systemImage: "arrowshape.turn.up.left.fill")
+                        .font(.caption.bold()).foregroundStyle(.secondary)
+                    Text(reply.body).font(.subheadline)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+
+            HStack(spacing: 14) {
+                if !isMine {
+                    Button(action: onHelpful) {
+                        Label(helpful ? "Helpful" : "Mark helpful",
+                              systemImage: helpful ? "hand.thumbsup.fill" : "hand.thumbsup")
+                    }
+                }
+                if let n = review.helpfulCount, n > 0 {
+                    Text("\(n) found this helpful").foregroundStyle(.secondary)
+                }
+                Spacer()
+                if isOwner {
+                    Button(review.reply == nil ? "Reply" : "Edit reply", action: onReply)
+                }
+            }
+            .font(.caption)
+            .buttonStyle(.plain)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)

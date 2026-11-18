@@ -14,8 +14,8 @@ struct AdvertiserHome: View {
     @State private var sponsoring: Listing?
     @State private var deleting: Listing?
     @State private var verifying: Listing?
+    @State private var viewingStats: Listing?
     @State private var showDeleteAccount = false
-    @State private var working = false
 
     var body: some View {
         NavigationStack {
@@ -34,7 +34,6 @@ struct AdvertiserHome: View {
                         Task { try? await supabase.auth.signOut() }
                     }
                     Button("Delete account", role: .destructive) { showDeleteAccount = true }
-                        .disabled(working)
                 }
 
                 if let error {
@@ -59,12 +58,15 @@ struct AdvertiserHome: View {
                 SubmitListingView(store: store, editing: l)
             }
             .sheet(item: $sponsoring) { l in
-                FeatureSheet(listing: l) {
+                FeatureSheet(listing: l, store: store) {
                     Task {
                         await loadMine()
                         await store.load()
                     }
                 }
+            }
+            .sheet(item: $viewingStats) { l in
+                StatsView(listing: l, store: store)
             }
             .sheet(item: $verifying) { l in
                 VerifySiteSheet(listing: l, store: store) {
@@ -81,11 +83,8 @@ struct AdvertiserHome: View {
             } message: { _ in
                 Text("Its reviews are removed too. This can't be undone, and any sponsorship time left on it is lost.")
             }
-            .alert("Delete your account?", isPresented: $showDeleteAccount) {
-                Button("Cancel", role: .cancel) {}
-                Button("Delete account", role: .destructive) { Task { await deleteAccount() } }
-            } message: {
-                Text("This permanently deletes your account, all your listings, and your reviews. Purchases you've already made can't be refunded by deleting your account.")
+            .sheet(isPresented: $showDeleteAccount) {
+                DeleteAccountSheet(store: store) { dismiss() }
             }
         }
         #if os(macOS)
@@ -107,11 +106,16 @@ struct AdvertiserHome: View {
                 Label("Sponsored until \(until.formatted(date: .abbreviated, time: .shortened))",
                       systemImage: "megaphone.fill")
                     .font(.caption).foregroundStyle(.orange)
+            } else if l.isScheduled, let from = l.sponsoredFrom, let until = l.sponsoredUntil {
+                Label("Sponsored \(from.formatted(date: .abbreviated, time: .omitted)) to \(until.formatted(date: .abbreviated, time: .omitted))",
+                      systemImage: "calendar")
+                    .font(.caption).foregroundStyle(.orange)
             }
             HStack(spacing: 8) {
                 Button { editing = l } label: { Label("Edit", systemImage: "pencil") }
+                Button { viewingStats = l } label: { Label("Stats", systemImage: "chart.bar") }
                 Button { sponsoring = l } label: {
-                    Label(l.isSponsored ? "Extend" : "Sponsor", systemImage: "megaphone")
+                    Label(l.isSponsored || l.isScheduled ? "Extend" : "Sponsor", systemImage: "megaphone")
                 }
                 if !l.verified {
                     Button { verifying = l } label: { Label("Verify", systemImage: "checkmark.seal") }
@@ -139,6 +143,8 @@ struct AdvertiserHome: View {
                 .order("created_at", ascending: false)
                 .execute()
                 .value
+        } catch is CancellationError {
+        } catch let e as URLError where e.code == .cancelled {
         } catch {
             self.error = error.localizedDescription
         }
@@ -154,15 +160,4 @@ struct AdvertiserHome: View {
         }
     }
 
-    private func deleteAccount() async {
-        working = true
-        error = nil
-        defer { working = false }
-        do {
-            try await store.deleteAccount()
-            dismiss()
-        } catch {
-            self.error = "Couldn't delete the account: \(error.localizedDescription)"
-        }
-    }
 }
